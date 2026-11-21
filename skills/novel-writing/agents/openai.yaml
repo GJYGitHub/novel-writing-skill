@@ -1,0 +1,4 @@
+interface:
+  display_name: "小说创作"
+  short_description: "从故事构思到分章大纲、正文续写、定向改稿和跨章节连续性检查"
+  default_prompt: "用 $novel-writing 为这个小说设定拟一份分章大纲，突出人物选择、代价和伏笔。"
