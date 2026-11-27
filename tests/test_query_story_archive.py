@@ -56,6 +56,30 @@ summary that need not be loaded
 | 无关 | 17 | {'背景' * 90}砖缝{'议论' * 90} |
 """
 
+STATES = """
+## 人物状态与信息变化
+
+| 人物 | 生效章／场 | 状态项 | 状态 | 出处 |
+| --- | --- | --- | --- | --- |
+| 蒋禾 | 300.2 | 与秦乌的关系 | FUTURE_SCENE | 300，南门 |
+| 蒋禾 | 5 | 与秦乌的关系 | OLD_ALLIANCE | 5，渡口 |
+| 蒋禾 | 300.1 | 与秦乌的关系 | TEMPORARY_TRUCE | 300，街口 |
+| 蒋禾 | `第299章` | 与秦乌的关系 | SEPARATED | E-099 |
+| 蒋禾 | 299.3 | 所在地 | DIFFERENT_ITEM | 299，酒馆 |
+| 蒋禾的姐姐 | 299.4 | 与秦乌的关系 | DIFFERENT_PERSON | 299，渡口 |
+"""
+
+DEPENDENCIES = """
+## 后文依赖
+
+| 事件编号 | 使用位置 | 依赖点 | 正文锚点 |
+| --- | --- | --- | --- |
+| E-018 | 846.1 | 把目击当成证据 | 改口段 |
+| `e-018` | 321.2 | 据此认出车夫 | 第二句对白 |
+| E-0180 | 322.1 | 另一件事 | 街口 |
+| E-018 | 75 | 拒绝再作证 | 门边对白 |
+"""
+
 
 class QueryStoryArchiveTest(unittest.TestCase):
     def setUp(self):
@@ -137,6 +161,102 @@ class QueryStoryArchiveTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("targeted text search", result.stderr)
 
+    def query_relationship(self, before):
+        return self.run_cli("state", "--person", "蒋禾", "--item", "与秦乌的关系",
+                            "--before", before)
+
+    def test_state_uses_latest_effective_chapter_and_ignores_future_and_other_fields(self):
+        self.archive.write_text(ARCHIVE + STATES, encoding="utf-8")
+        result = self.query_relationship("300")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SEPARATED | E-099", result.stdout)
+        for excluded in ("OLD_ALLIANCE", "TEMPORARY_TRUCE", "FUTURE_SCENE",
+                         "DIFFERENT_ITEM", "DIFFERENT_PERSON"):
+            self.assertNotIn(excluded, result.stdout)
+
+    def test_state_includes_earlier_scene_but_not_the_requested_scene(self):
+        self.archive.write_text(ARCHIVE + STATES, encoding="utf-8")
+        result = self.query_relationship("300.2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("TEMPORARY_TRUCE", result.stdout)
+        self.assertNotIn("FUTURE_SCENE", result.stdout)
+
+    def test_state_does_not_guess_legacy_dates_or_unspecified_same_chapter_scenes(self):
+        for when, before in (("新年后", "300"), ("300", "300.2"), ("299.1", "300")):
+            with self.subTest(when=when, before=before):
+                row = f"| 蒋禾 | {when} | 与秦乌的关系 | UNRESOLVED | E-042 |\n"
+                self.archive.write_text(ARCHIVE + STATES + row, encoding="utf-8")
+                result = self.query_relationship(before)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("verify the source", result.stdout)
+                self.assertNotIn("[state]", result.stdout)
+
+    def test_state_rejects_duplicate_latest_and_reports_no_earlier_record(self):
+        duplicate = "| 蒋禾 | 299 | 与秦乌的关系 | CONFLICT | E-042 |\n"
+        self.archive.write_text(ARCHIVE + STATES + duplicate, encoding="utf-8")
+        result = self.query_relationship("300")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Ambiguous latest state", result.stdout)
+        self.assertNotIn("[state]", result.stdout)
+        result = self.query_relationship("5")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("No recorded state strictly before", result.stdout)
+
+    def test_impact_finds_only_explicit_uses_of_removed_event_in_story_order(self):
+        self.archive.write_text(ARCHIVE + DEPENDENCIES, encoding="utf-8")
+        result = self.run_cli("impact", "--event", "e-018", "--limit", "2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("3 recorded direct dependency", result.stdout)
+        self.assertLess(result.stdout.index("拒绝再作证"), result.stdout.index("据此认出车夫"))
+        self.assertIn("--offset 2", result.stdout)
+        self.assertNotIn("另一件事", result.stdout)
+        self.assertNotIn("把目击当成证据", result.stdout)
+        page = self.run_cli("impact", "--event", "E-018", "--limit", "2", "--offset", "2")
+        self.assertIn("把目击当成证据", page.stdout)
+        self.assertNotIn("拒绝再作证", page.stdout)
+
+    def test_impact_distinguishes_no_records_from_malformed_records(self):
+        self.archive.write_text(ARCHIVE + DEPENDENCIES, encoding="utf-8")
+        result = self.run_cli("impact", "--event", "E-999")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("0 recorded direct dependency", result.stdout)
+        self.assertIn("coverage may be incomplete", result.stdout)
+        self.archive.write_text(ARCHIVE + DEPENDENCIES.replace("846.1", "旧稿末尾"),
+                                encoding="utf-8")
+        result = self.run_cli("impact", "--event", "E-018")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("verify the archive", result.stdout)
+        self.assertNotIn("[dependency]", result.stdout)
+
+    def test_retrieval_at_thousand_chapter_scale_remains_targeted(self):
+        history = "".join(
+            f"| 蒋禾 | {chapter}.1 | 与秦乌的关系 | STATE_{chapter:04} | E-{chapter:04} |\n"
+            for chapter in range(1000, 0, -1)
+        )
+        events = "".join(
+            f"| E-{chapter:04} | EVENT_{chapter:04} | {chapter} |\n"
+            for chapter in range(1, 1001)
+        )
+        event_table = "\n## 关键事件与时间线\n\n| 编号 | 经过 | 出处 |\n| --- | --- | --- |\n"
+        state_header = STATES.split("| 蒋禾 |", 1)[0]
+        self.archive.write_text(
+            event_table + events + state_header + history + DEPENDENCIES, encoding="utf-8"
+        )
+        result = self.query_relationship("1000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("STATE_0999", result.stdout)
+        self.assertNotIn("STATE_1000", result.stdout)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        result = self.query_relationship("1000.2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("STATE_1000", result.stdout)
+        result = self.run_cli("read", "--event", "E-0006")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("EVENT_0006", result.stdout)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        result = self.run_cli("impact", "--event", "E-018")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("[dependency]"), 3)
 
 if __name__ == "__main__":
     unittest.main()
